@@ -1,4 +1,4 @@
-" Copyright 2017 Google Inc. All rights reserved.
+" Copyright 2020 Google Inc. All rights reserved.
 "
 " Licensed under the Apache License, Version 2.0 (the "License");
 " you may not use this file except in compliance with the License.
@@ -12,104 +12,59 @@
 " See the License for the specific language governing permissions and
 " limitations under the License.
 
-let s:QUIT_KEY = 'q'
-let s:HELP_KEY = 'H'
-
 if !exists('s:selectors_by_buffer_number')
   let s:selectors_by_buffer_number = {}
 endif
 
 
-" The default keymappings.
-function! s:GetDefaultKeyMappings() abort
-  return {
-      \ '<CR>' : ['maktaba#ui#selector#NoOp', 'Close', 'Do something'],
-      \ s:HELP_KEY : [
-          \ 'maktaba#ui#selector#ToggleCurrentHelp',
-          \ 'NoOp',
-          \ 'Toggle verbose help messages'],
-      \ s:QUIT_KEY : ['maktaba#ui#selector#NoOp', 'Close', 'Close the window']
-      \ }
-endfunction
-
-
-" Create the full key mappings dict.
-function! s:ExpandedKeyMappings(mappings) abort
-  let l:window_action_mapping = {
-      \ 'Close' : 'maktaba#ui#selector#CloseWindow',
-      \ 'Return' : 'maktaba#ui#selector#ReturnToWindow',
-      \ 'NoOp'  : 'maktaba#ui#selector#NoOp'
-      \ }
-  " A map from the key (scrubbed of <>s) to:
-  "   - The main action
-  "   - the window action
-  "   - the help item
-  "   - the actual key press (with the brackets)
-  let l:expanded_mappings = {}
-  for l:keypress in keys(a:mappings)
-    let l:items = a:mappings[l:keypress]
-    " Check if the keypress is just left or right pointies (<>)
-    let l:scrubbed = l:keypress
-    if l:keypress =~# '\m<\|>'
-      " Left and right pointies must be scrubbed -- they have special meaning
-      " when used in the context of creating key mappings, which is where the
-      " scrubbed keypresses are used.
-      let l:scrubbed = substitute(substitute(l:keypress, '<', '_Gr', 'g'),
-          \ '>', '_Ls', 'g')
-    endif
-    let l:window_action = get(l:window_action_mapping,
-        \ l:items[1], l:items[1])
-    let l:expanded_mappings[l:scrubbed] =
-        \ [l:items[0], l:window_action, l:items[2], l:keypress]
-  endfor
-  return l:expanded_mappings
-endfunction
+""
+" @dict Selector
+" Representation of a set of lines for a user to select from, e.g. list of files.
+" It can be created with @function(#Create), configured with syntax
+" highlighting, key mappings, etc. and shown as a vim window.
+"
+" The Selector dict has the following options:
+"
 
 
 ""
-" Unzips {infolist}, a list of selector entries, into line text and data.
-" Each selector entry may be either a string, or a pair (LINE, DATA) stored in a
-" list.
+" @public
+" Creates a @dict(Selector) from {lines} that can be configured with 
+" an optional [options] object and then displayed with Show()
 "
-" Returns a flat list of lines and a dict mapping line numbers to data.
-function! s:SplitLinesAndData(infolist) abort
-  let l:lines = []
-  let l:data = {}
-  for l:index in range(len(a:infolist))
-    unlet! l:entry l:datum
-    let l:entry = a:infolist[l:index]
-    if maktaba#value#IsList(l:entry)
-      let [l:line, l:datum] = l:entry
-    else
-      let l:line = maktaba#ensure#IsString(l:entry)
-    endif
-    call add(l:lines, l:line)
-    if exists('l:datum')
-      " Vim line numbers are 1-based.
-      let l:data[l:index + 1] = l:datum
-    endif
-  endfor
-  return [l:lines, l:data]
-endfunction
+" Simple Example:
+" >
+"   call maktaba#ui#selector#Create(['foo', 'bar']).Show()
+" <
+"
+" {lines} is intended to be a list of lines to display. It should have one
+" of three formats:
+" - A raw string.
+" - A list of strings
+" - A list of lists, which each sublist is a tuple of `[LINE, DATA]`, which
+"   can be useful if you want each line to correspond to some hidden lines.
+"
+" Support values for [options]
+" * 'key_mappings': dict of custom keymappings to provide for the selector
+"   window. Each entry must have the format: >
+"     'key_to_press': {
+"         'action': ActionFunction({line}, [datum]),
+"         'window': 'SelectorWindowAction', (one of NoOp, Close, Return)
+"         'description: 'Help Text'
+"     }
+"   <
+" * 'title': Title of the window. By default, '__SelectorWindow__'
+function! maktaba#ui#selector#Create(lines, ...) abort
+  let l:options = (a:0 >= 1 && a:1 isnot -1) ?
+      \ maktaba#ensure#IsDict(a:1) : {}
+  let l:selector = s:DefaultSelectorOptions()
+  " Set the input lines; they will be validated later in
+  " s:MergeAndProcessOptions.
+  let l:selector['lines'] = a:lines
 
-
-" Set the Window Options for the created window.
-function! s:SetWindowOptions(selector) abort
-  if v:version >= 700
-    setlocal buftype=nofile
-    setlocal bufhidden=delete
-    setlocal noswapfile
-    setlocal readonly
-    setlocal cursorline
-    setlocal nolist
-    setlocal nomodifiable
-    setlocal nospell
-  endif
-  call maktaba#function#Call(a:selector._ApplyExtraOptions)
-  if has('syntax')
-    call maktaba#function#Call(a:selector._ApplySyntax)
-    call s:BaseSyntax()
-  endif
+  " Merge and validate options from the user. Also set up the keymappings.
+  call s:MergeAndProcessOptions(l:selector, l:options)
+  return l:selector
 endfunction
 
 
@@ -127,62 +82,25 @@ function! s:CommentLines(str)
 endfunction
 
 
-" The base syntax defines the comment syntax in the selector window, which is
-" used for the Help menus.
-function! s:BaseSyntax() abort
-  syntax region SelectorComment start='^"' end='$'
-      \ contains=SelectorKey,SelectorKey2,SelectorKey3
-  syntax match SelectorKey "'<\?\w*>\?'" contained
-  syntax match SelectorKey2 '<\w*>\t:\@=' contained
-  syntax match SelectorKey3
-      \ '\(\w\|<\|>\)\+\(,\(\w\|<\|>\)\+\)*\t:\@=' contained
-  highlight default link SelectorComment Comment
-  highlight default link SelectorKey Keyword
-  highlight default link SelectorKey2 Keyword
-  highlight default link SelectorKey3 Keyword
-endfunction
-
-
 ""
-" @dict Selector
-" Representation of a set of data for a user to select from, e.g. list of files.
-" It can be created with @function(#Create), configured with syntax
-" highlighting, key mappings, etc. and shown as a vim window.
-
-
-""
-" @public
-" Creates a @dict(Selector) from {infolist} that can be configured and shown.
+" @dict Selector.WithOptions
 "
-" Each entry in {infolist} may be either a line to display, or a 2-item list
-" containing `[LINE, DATA]`. If present, DATA will be passed to the action
-" function as a second argument.
-function! maktaba#ui#selector#Create(infolist) abort
-  let l:selector = {
-      \ '_infolist': a:infolist,
-      \ '_name': '__SelectorWindow__',
-      \ '_is_verbose': 0,
-      \ '_ApplySyntax': function('maktaba#ui#selector#DefaultSetSyntax'),
-      \ '_ApplyExtraOptions': function('maktaba#ui#selector#DefaultExtraOptions'),
-      \ '_GetHelpLines': function('maktaba#ui#selector#DoGetHelpLines'),
-      \ 'WithMappings': function('maktaba#ui#selector#DoWithMappings'),
-      \ 'WithSyntax': function('maktaba#ui#selector#DoWithSyntax'),
-      \ 'WithExtraOptions': function('maktaba#ui#selector#DoWithExtraOptions'),
-      \ 'WithName': function('maktaba#ui#selector#DoWithName'),
-      \ 'Show': function('maktaba#ui#selector#DoShow'),
-      \ 'ToggleHelp': function('maktaba#ui#selector#DoToggleHelp'),
-      \ '_GetLineData': function('maktaba#ui#selector#DoGetLineData')}
-  return l:selector.WithMappings({})
+" Process options passed in by the user and set defaults accordingly. The
+" following options are available to be set:
+function! maktaba#ui#selector#DoWithOptions(options) dict abort
+  call s:MergeAndProcessOptions(self, a:options)
+  return self
 endfunction
 
 
 ""
 " @dict Selector.WithMappings
 " Set {keymappings} to use in the selector window. Must have the form: >
-"   'keyToPress': [
-"       ActionFunction({line}, [datum]),
-"       'SelectorWindowAction',
-"       'Help Text']
+"   'keyToPress': {
+"       'action': ActionFunction({line}, [datum]),
+"       'window': 'SelectorWindowAction', (one of NoOp, Close, Return)
+"       'description: 'Help Text'
+"   }
 " <
 " Where the "ActionFunction" is the name of a function you specify, which
 " takes one or two arguments:
@@ -204,50 +122,16 @@ endfunction
 
 
 ""
-" @dict Selector.WithSyntax
-" Configures an {ApplySyntax} function to be called in the selector window.
-" This will by applied in addition to standard syntax rules for rendering the
-" help header, etc.
-function! maktaba#ui#selector#DoWithSyntax(ApplySyntax) dict abort
-  let self._ApplySyntax = maktaba#ensure#IsCallable(a:ApplySyntax)
-  return self
-endfunction
-
-
-""
-" @dict Selector.WithExtraOptions
-" Configures {ApplyExtraOptions} for additional window-local settings for
-" selector window.
-" If not configured, the default extra options just disable 'number'.
-function! maktaba#ui#selector#DoWithExtraOptions(ApplyExtraOptions) dict abort
-  let self._ApplyExtraOptions = maktaba#ensure#IsCallable(a:ApplyExtraOptions)
-  return self
-endfunction
-
-
-""
-" @dict Selector.WithName
-" Configures {name} to show as the window name on the selector.
-" If not configured, the default name is "__SelectorWindow__".
-function! maktaba#ui#selector#DoWithName(name) dict abort
-  let self._name = maktaba#ensure#IsString(a:name)
-  return self
-endfunction
-
-
-""
 " @dict Selector.Show
 " Shows a selector window for the @dict(Selector) with [minheight], [maxheight],
 " and [position].
 " @default minheight=5
 " @default maxheight=25
 " @default position='botright'
-function! maktaba#ui#selector#DoShow(...) dict abort
-  let l:min_win_height = (a:0 >= 1 && a:1 isnot -1) ?
-      \ maktaba#ensure#IsNumber(a:1) : 5
-  let l:max_win_height = (a:0 >= 2 && a:2 isnot -1) ?
-      \ maktaba#ensure#IsNumber(a:2) : 25
-  let l:position = maktaba#ensure#IsString(get(a:, 3, 'botright'))
+function! maktaba#ui#selector#DoShow() dict abort
+  let l:min_win_height = self.minheight
+  let l:max_win_height = self.maxheight
+  let l:position = self.position
 
   " Show one empty line at the bottom of the window.
   " (2 is correct -- I know it looks bizarre)
@@ -267,8 +151,10 @@ function! maktaba#ui#selector#DoShow(...) dict abort
   execute l:position l:win_size 'new'
   let s:selectors_by_buffer_number[bufnr('%')] = self
   call s:SetWindowOptions(self)
-  silent execute 'file' self._name
-  let [l:lines, l:data] = s:SplitLinesAndData(self._infolist)
+  silent execute 'file' self.title
+  let l:lines = self._infolist.lines
+  let l:data = self._infolist.data
+
   let b:selector_lines_data = l:data
   call s:InstantiateKeyMaps(self._mappings)
   setlocal noreadonly
@@ -309,7 +195,7 @@ endfunction
 " comments at the top. Documents all key mappings if `self.verbose` is 1,
 " otherwise just documents that H toggles help.
 function! maktaba#ui#selector#DoGetHelpLines() dict abort
-  if self._is_verbose
+  if self._show_verbose_help
     " Map from comments to keys.
     let l:comments_keys = {}
     for l:items in values(self._mappings)
@@ -360,7 +246,7 @@ function! maktaba#ui#selector#DoToggleHelp() dict abort
   setlocal noreadonly
   setlocal modifiable
   let l:len_help = len(self._GetHelpLines())
-  let self._is_verbose = !self._is_verbose
+  let self._show_verbose_help = !self._show_verbose_help
   call maktaba#buffer#Overwrite(1, l:len_help, self._GetHelpLines())
   let &readonly = l:prev_read
   let &modifiable = l:prev_mod
@@ -376,25 +262,6 @@ function! s:InstantiateKeyMaps(mappings) abort
         \ . " :call maktaba#ui#selector#KeyCall('" . l:scrubbed_key . "')<CR>"
     execute l:mapping
   endfor
-endfunction
-
-
-""
-" @private
-function! maktaba#ui#selector#DefaultExtraOptions() abort
-  setlocal nonumber
-endfunction
-
-
-""
-" @private
-" The default syntax function.  Mostly, this exists to test that setting-syntax
-" works, and it's expected that this will be overwritten
-function! maktaba#ui#selector#DefaultSetSyntax() abort
-  syntax match filepart '/\?\(\w*/\)*\w*' nextgroup=javaext
-  syntax match javaext '[.][a-z]*$'
-  highlight default link filepart Directory
-  highlight default link javaext Function
 endfunction
 
 
@@ -429,6 +296,287 @@ endfunction
 
 ""
 " @private
+" Internal syntax used for the help text in the selector window.
+function! maktaba#ui#selector#DoHelpTextSyntax() dict abort
+  syntax region SelectorComment start='^"' end='$'
+      \ contains=SelectorKey,SelectorKey2,SelectorKey3
+  syntax match SelectorKey "'<\?\w*>\?'" contained
+  syntax match SelectorKey2 '<\w*>\t:\@=' contained
+  syntax match SelectorKey3
+      \ '\(\w\|<\|>\)\+\(,\(\w\|<\|>\)\+\)*\t:\@=' contained
+  highlight default link SelectorComment Comment
+  highlight default link SelectorKey Keyword
+  highlight default link SelectorKey2 Keyword
+  highlight default link SelectorKey3 Keyword
+endfunction
+
+
+"-------------------------
+" Options processing code
+"-------------------------
+
+" Get the default selector options. This is essentially the constructor for
+" the selector.
+function! s:DefaultSelectorOptions() abort
+  let l:default_mappings = s:DefaultKeyMappings()
+  let l:system_key_mappings = s:SystemDefaultKeyMappings()
+  let l:default_window_options = s:DefaultWindowOptions()
+
+  " Create a selector object width the relevant defaults
+  "
+  " For readability of this code:
+  " - User-provided options should go first
+  " - public methods should follow.
+  " - private lines and private methods should go second, prefixed by _
+  let l:selector = {
+    \ 'lines': [],
+    \
+    \ 'title': '__SelectorWindow__',
+    \ 'minheight': 5,
+    \ 'maxheight': 25,
+    \ 'cursorline': 1,
+    \ 'split': 'botright',
+    \ 'filetype': 'selectorwindow',
+    \ 'custom_syntax': {
+    \   'syntax': [],
+    \   'highlight': [],
+    \ },
+    \ 'key_mappings': l:default_mappings,
+    \ 'postdisplay_callback': function('maktaba#ui#selector#NoOp'),
+    \
+    \ 'WithOptions': function('maktaba#ui#selector#DoWithOptions'),
+    \ 'Show': function('maktaba#ui#selector#DoShow'),
+    \ 'ToggleHelp': function('maktaba#ui#selector#DoToggleHelp'),
+    \
+    \ '_window_options': l:default_window_options,
+    \ '_system_key_mappings': l:system_key_mappings,
+    \ '_show_verbose_help': 0,
+    \ '_processed_key_mappings': {},
+    \ '_processed_lines': {},
+    \ '_HelpTextSyntax': function('maktaba#ui#selector#DoHelpTextSyntax'),
+    \ '_GetHelpLines': function('maktaba#ui#selector#DoGetHelpLines'),
+    \ '_GetLineData': function('maktaba#ui#selector#DoGetLineData'),
+  \ }
+  return l:selector
+endfunction
+
+" Take options from the user and merge them into an existing selector object.
+function! s:MergeAndProcessOptions(selector, options) abort
+  let l:selector = maktaba#ensure#IsDict(a:selector)
+          let l:options = maktaba#ensure#IsDict(a:options)
+
+  let l:selector['_processed_data'] = s:ProcessInfoList(l:selector['lines'])
+
+  " Key-to-function map, where the key indicates how the key should be
+  " processed. There are two options for functions:
+  " - 'process': Function of the form fn(option_value) that validates a value
+  "   and which just overwrites the old value.
+  " - 'processComplex': Function of the form fn(existing_value, new_value)
+  "   that allows for more complex merging logic.
+  let l:process_options = {
+    \ 'title': {'process': function('maktaba#ensure#IsString')},
+    \ 'minheight': {'process': function('maktaba#ensure#IsNumber')},
+    \ 'maxheight': {'process': function('maktaba#ensure#IsNumber')},
+    \ 'cursorline': {'process': function('maktaba#ensure#IsBool')},
+    \ 'split': {'process': function('maktaba#ensure#IsString')},
+    \ 'filetype': {'process': function('maktaba#ensure#IsString')},
+    \ 'custom_syntax': {
+    \   'process_complex': function('maktaba#ui#selector#ProcessCustomSyntax'),
+    \ },
+    \ 'key_mappings': {
+    \   'process_complex': function('maktaba#ui#selector#ProcessKeyMappings'),
+    \ },
+    \ 'postdisplay_callback': {
+    \   'process': function('maktaba#ensure#IsFuncref'),
+    \ },
+  \ }
+
+  for l:key in keys(l:options)
+    if !has_key(l:process_options, l:key)
+      throw maktaba#error#BadValue(
+        \ 'SelectorWindow option "%s" unknown. ' .
+        \ ' Available options are %s', l:key, sort(keys(l:process_options)))
+    endif
+  endfor
+
+  for l:key in keys(l:process_options)
+    let l:proc = l:process_options[l:key]
+    if has_key(l:options, l:key)
+      if !has_key(l:selector, l:key)
+        " This would be a programming error on the part of the maktaba
+        " authors. Oops.
+        throw maktaba#error#Failure('Key %s not in selector options', l:key)
+      endif
+      try
+        if has_key(l:proc, 'process')
+          let l:selector[l:key] = l:proc['process'](l:options[l:key])
+        elseif has_key(l:proc, 'process_complex')
+          let l:selector[l:key] =
+            \ l:proc['process_complex'](l:selector[l:key], l:options[l:key])
+        endif
+      catch /WrongType/
+        " This is sort of a hacky way to to add in additionall information to
+        " the exception message.
+        throw v:exception . ' Check the type for option "' . l:key . '"'
+      endtry
+    endif
+  endfor
+
+  return l:selector
+endfunction
+
+
+""
+" @private
+" Process custom syntax options
+function! maktaba#ui#selector#ProcessCustomSyntax(sel_val, opt_val) abort
+  let l:ov = maktaba#ensure#IsDict(a:opt_val)
+  let l:out = {
+    \ 'syntax': [],
+    \ 'highlight': [],
+  \ }
+  for l:key in keys(l:ov)
+    if l:key != 'syntax' && l:key != 'highlight'
+      throw maktaba#error#BadValue(
+        \ 'For "custom_syntax" option, got unknown key "%s"; ' .
+        \ 'only possible keys are "syntax" and "highlight"', l:key)
+    endif
+  endfor
+  if has_key(l:ov, 'syntax')
+    let l:out['syntax'] = maktaba#ensure#IsList(l:ov['syntax'])
+  endif
+  if has_key(l:ov, 'highlight')
+    let l:out['highlight'] = maktaba#ensure#IsList(l:ov['highlight'])
+  endif
+  return l:out
+endfunction
+
+
+""
+" @private
+"
+" Process custom key mappings. Should be a Dict of Dicts, where each key in
+" the parent dict should look like:
+"
+" >
+"   'key_to_press': {
+"       'action': ActionFunction({line}, [datum]),
+"       'window': '<SelectorWindowAction>', (one of NoOp, Close, Return)
+"       'description: 'Help Text'
+"   }
+" <
+"
+" An empty object will remove a key:
+"
+" >
+"   'key_to_remove': {}
+" <
+function! maktaba#ui#selector#ProcessKeyMappings(sel_val, opt_val) abort
+  let l:sv = maktaba#ensure#IsDict(a:sel_val)
+  let l:ov = maktaba#ensure#IsDict(a:opt_val)
+  let l:out = {}
+  for l:key in keys(l:sv)
+    let l:out[l:key] = l:sv[l:key]
+  endfor
+  for l:key in keys(l:ov)
+    let l:key_obj = l:ov[l:key]
+    if len(l:key_obj) == 0
+      " Special case: Remove the key object.
+      if has_key(l:out, l:key)
+        call remove(l:out, l:key)
+      endif
+      continue
+    endif
+
+    call maktaba#ensure#IsFuncref(l:key_obj['action'])
+    let l:window = l:key_obj['window']
+    if !has_key(s:window_action_mapping, l:window)
+      call maktaba#error#BadValue('For key %s, got window action ' .
+        \ '%s, but most be one of Close, Return, NoOp', l:key, l:window)
+    endif
+    call maktaba#ensure#IsString(l:key_obj['description'])
+    let l:out[l:key] = l:key_obj
+  endfor
+  return l:out
+endfunction
+
+" Available options for the 'window' option in a key mapping.
+let s:window_action_mapping = {
+\ 'Close' : function('maktaba#ui#selector#CloseWindow'),
+\ 'Return' : function('maktaba#ui#selector#ReturnToWindow'),
+\ 'NoOp'  : function('maktaba#ui#selector#NoOp'),
+\ }
+
+
+" Create the full key mappings dict.
+function! s:ExpandedKeyMappings(mappings) abort
+  " A map from the key (scrubbed of <>s) to:
+  "   - The main action
+  "   - the window action
+  "   - the help item
+  "   - the actual key press (with the brackets)
+  let l:expanded_mappings = {}
+  for l:keypress in keys(a:mappings)
+    let l:items = a:mappings[l:keypress]
+    " Check if the keypress is just left or right pointies (<>)
+    let l:scrubbed = l:keypress
+    if l:keypress =~# '\m<\|>'
+      " Left and right pointies must be scrubbed -- they have special meaning
+      " when used in the context of creating key mappings, which is where the
+      " scrubbed keypresses are used.
+      let l:scrubbed = substitute(substitute(l:keypress, '<', '_Gr', 'g'),
+          \ '>', '_Ls', 'g')
+    endif
+    let l:window_action = get(s:WindowActionMapping,
+        \ l:items[1], l:items[1])
+    let l:expanded_mappings[l:scrubbed] =
+        \ [l:items[0], l:window_action, l:items[2], l:keypress]
+  endfor
+  return l:expanded_mappings
+endfunction
+
+
+" Processes {lines}, which has the following formats:
+" * A raw string
+" * A list of strings
+" * A list of lists, where the sub-list should be a tuple having the format of
+"   (string, data)
+"
+" Returns a dict with two fields:
+" - lines: list of string data to display
+" - data: dict, keyed by line number, with the value being some arbitrary
+"   data to associate with that line number.
+function! s:ProcessLines(lines) abort
+  let l:info = a:data
+  if maktaba#value#IsString(l:info)
+    let l:info = split(l:info, "\n")
+  endif
+  let l:info = maktaba#ensure#IsList(l:info)
+
+  let l:lines = []
+  let l:data = {}
+  for l:index in range(len(l:info))
+    unlet! l:entry l:datum
+    let l:entry = l:info[l:index]
+    if maktaba#value#IsList(l:entry)
+      let [l:line, l:datum] = l:entry
+    else
+      let l:line = maktaba#ensure#IsString(l:entry)
+    endif
+    call add(l:lines, l:line)
+    if exists('l:datum')
+      " Vim line numbers are 1-based.
+      let l:data[l:index + 1] = l:datum
+    endif
+  endfor
+  return {
+    \ "lines": l:lines,
+    \ "data": l:data,
+    \ }
+endfunction
+
+""
+" @private
 " Close the window and return to the initial-calling window.
 function! maktaba#ui#selector#CloseWindow() abort
   bdelete
@@ -438,7 +586,7 @@ endfunction
 
 ""
 " @private
-" Return the user to the previous window
+" Return the user to the previous window but don't close the selector window.
 function! maktaba#ui#selector#ReturnToWindow() abort
   execute s:last_winnum . 'wincmd w'
   call setpos('.', s:curpos_holder)
@@ -448,6 +596,56 @@ endfunction
 
 ""
 " @private
-" A default function
+" A default function callback that does nothing.
 function! maktaba#ui#selector#NoOp(...) abort
+endfunction
+
+
+" Provide the default keymappings.
+"
+" Key mappings should have the format
+" - action: a function to perform when the key is pressed
+" - window: how to handle selector window. Generally one of Close, NoOp, or
+"   Return
+" - description: a string description of what this key does.
+function! s:DefaultKeyMappings() abort
+  return {
+      \ '<CR>': {
+      \   'action': function('maktaba#ui#selector#NoOp'),
+      \   'window': 'Close',
+      \   'description': 'Do something',
+      \ }}
+endfunction
+
+
+" Provide the default system keymappings -- i.e., q and h. These are meant to
+" be reserved by the selector window.
+function! s:SystemDefaultKeyMappings() abort
+  return {
+      \ 'h': {
+      \   'action': function('maktaba#ui#selector#ToggleCurrentHelp'),
+      \   'window': 'NoOp',
+      \   'description': 'Toggle verbose help messages',
+      \ },
+      \ 'q': {
+      \   'action': function('maktaba#ui#selector#NoOp'),
+      \   'window': 'Close',
+      \   'description': 'Close the window',
+      \ }}
+endfunction
+
+
+" DefaultWindowOptions gets the default window options
+" All window options will be set with `setlocal`.
+function! s:DefaultWindowOptions() abort
+  return [
+    \ 'buftype=nofile',
+    \ 'bufhidden=delete',
+    \ 'noswapfile',
+    \ 'readonly',
+    \ 'nolist',
+    \ 'nomodifiable',
+    \ 'nospell',
+    \ 'syntax on',
+  \ ]
 endfunction
