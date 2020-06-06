@@ -45,7 +45,7 @@ endif
 "   can be useful if you want each line to correspond to some hidden lines.
 "
 " Support values for [options]
-" * 'key_mappings': dict of custom keymappings to provide for the selector
+" * 'mapping': dict of custom keymappings to provide for the selector
 "   window. Each entry must have the format: >
 "     'key_to_press': {
 "         'action': ActionFunction({line}, [datum]),
@@ -146,8 +146,8 @@ function! maktaba#ui#selector#DoShow() dict abort
   let s:curpos_holder = getpos(".")
   let s:last_winnum = winnr()
 
-  " Open the window in the specified window position.  Typically, this opens up
-  " a flat window on the bottom (as with split).
+  " Open the window in the specified window position.  Typically, this opens
+  " up a flat window on the bottom (as with split).
   execute l:position l:win_size 'new'
   let s:selectors_by_buffer_number[bufnr('%')] = self
   call s:SetWindowOptions(self)
@@ -335,13 +335,13 @@ function! s:DefaultSelectorOptions() abort
     \ 'minheight': 5,
     \ 'maxheight': 25,
     \ 'cursorline': 1,
-    \ 'split': 'botright',
+    \ 'pos': 'botright',
     \ 'filetype': 'selectorwindow',
     \ 'custom_syntax': {
     \   'syntax': [],
     \   'highlight': [],
     \ },
-    \ 'key_mappings': l:default_mappings,
+    \ 'mapping': l:default_mappings,
     \ 'postdisplay_callback': function('maktaba#ui#selector#NoOp'),
     \
     \ 'WithOptions': function('maktaba#ui#selector#DoWithOptions'),
@@ -365,7 +365,7 @@ function! s:MergeAndProcessOptions(selector, options) abort
   let l:selector = maktaba#ensure#IsDict(a:selector)
           let l:options = maktaba#ensure#IsDict(a:options)
 
-  let l:selector['_processed_data'] = s:ProcessInfoList(l:selector['lines'])
+  let l:selector['_processed_data'] = s:ProcessLines(l:selector['lines'])
 
   " Key-to-function map, where the key indicates how the key should be
   " processed. There are two options for functions:
@@ -374,21 +374,15 @@ function! s:MergeAndProcessOptions(selector, options) abort
   " - 'processComplex': Function of the form fn(existing_value, new_value)
   "   that allows for more complex merging logic.
   let l:process_options = {
-    \ 'title': {'process': function('maktaba#ensure#IsString')},
-    \ 'minheight': {'process': function('maktaba#ensure#IsNumber')},
-    \ 'maxheight': {'process': function('maktaba#ensure#IsNumber')},
-    \ 'cursorline': {'process': function('maktaba#ensure#IsBool')},
-    \ 'split': {'process': function('maktaba#ensure#IsString')},
-    \ 'filetype': {'process': function('maktaba#ensure#IsString')},
-    \ 'custom_syntax': {
-    \   'process_complex': function('maktaba#ui#selector#ProcessCustomSyntax'),
-    \ },
-    \ 'key_mappings': {
-    \   'process_complex': function('maktaba#ui#selector#ProcessKeyMappings'),
-    \ },
-    \ 'postdisplay_callback': {
-    \   'process': function('maktaba#ensure#IsFuncref'),
-    \ },
+    \ 'title': function('maktaba#ui#selector#ProcessTitleOpt'),
+    \ 'minheight': function('maktaba#ui#selector#ProcessMinHeightOpt'),
+    \ 'maxheight': function('maktaba#ui#selector#ProcessMaxHeightOpt'),
+    \ 'cursorline': function('maktaba#ui#selector#ProcessCursorlineOpt'),
+    \ 'pos': function('maktaba#ui#selector#ProcessPosOpt'),
+    \ 'filetype': function('maktaba#ui#selector#ProcessFiletypeOpt'),
+    \ 'custom_syntax': function('maktaba#ui#selector#ProcessCustomSyntaxOpt'),
+    \ 'mapping': function('maktaba#ui#selector#ProcessKeyMappingsOpt'),
+    \ 'postdisplay_callback': function('maktaba#ui#selector#ProcessCallbackOpt'),
   \ }
 
   for l:key in keys(l:options)
@@ -400,25 +394,14 @@ function! s:MergeAndProcessOptions(selector, options) abort
   endfor
 
   for l:key in keys(l:process_options)
-    let l:proc = l:process_options[l:key]
     if has_key(l:options, l:key)
       if !has_key(l:selector, l:key)
         " This would be a programming error on the part of the maktaba
         " authors. Oops.
         throw maktaba#error#Failure('Key %s not in selector options', l:key)
       endif
-      try
-        if has_key(l:proc, 'process')
-          let l:selector[l:key] = l:proc['process'](l:options[l:key])
-        elseif has_key(l:proc, 'process_complex')
-          let l:selector[l:key] =
-            \ l:proc['process_complex'](l:selector[l:key], l:options[l:key])
-        endif
-      catch /WrongType/
-        " This is sort of a hacky way to to add in additionall information to
-        " the exception message.
-        throw v:exception . ' Check the type for option "' . l:key . '"'
-      endtry
+      let l:selector[l:key] = l:process_options[l:key](
+          \ l:key, l:options[l:key], l:selector[l:key])
     endif
   endfor
 
@@ -428,8 +411,80 @@ endfunction
 
 ""
 " @private
+" Process the title option
+function! maktaba#ui#selector#ProcessTitleOpt(key, opt_val, sel_val) abort
+  if !maktaba#value#IsString(a:opt_val)
+    throw maktaba#error#WrongType('Selector option key %s should be a '
+        \ . 'string, but was %s', a:key, a:opt_val)
+  endif
+  return a:opt_val
+endfunction
+
+
+""
+" @private
+" Process the min height option
+function! maktaba#ui#selector#ProcessMinHeightOpt(key, opt_val, sel_val) abort
+  if !maktaba#value#IsNumber(a:opt_val)
+    throw maktaba#error#WrongType('Selector option key %s should be a '
+        \ . 'number, but was %s', a:key, a:opt_val)
+  endif
+  return a:opt_val
+endfunction
+
+
+""
+" @private
+" Process the max height option
+function! maktaba#ui#selector#ProcessMaxHeightOpt(key, opt_val, sel_val) abort
+  if !maktaba#value#IsNumber(a:opt_val)
+    throw maktaba#error#WrongType('Selector option key %s should be a '
+        \ . 'number, but was %s', a:key, a:opt_val)
+  endif
+  return a:opt_val
+endfunction
+
+
+""
+" @private
+" Process the cursorline option
+function! maktaba#ui#selector#ProcessCursorlineOpt(key, opt_val, sel_val) abort
+  if !maktaba#value#IsBool(a:opt_val)
+    throw maktaba#error#WrongType('Selector option key %s should be a '
+        \ . 'bool, but was %s', a:key, a:opt_val)
+  endif
+  return a:opt_val
+endfunction
+
+
+""
+" @private
+" Process the split option
+function! maktaba#ui#selector#ProcessPosOpt(key, opt_val, sel_val) abort
+  if !maktaba#value#IsString(a:opt_val)
+    throw maktaba#error#WrongType('Selector option key %s should be a '
+        \ . 'string, but was %s', a:key, a:opt_val)
+  endif
+  return a:opt_val
+endfunction
+
+
+""
+" @private
+" Process the filetype option
+function! maktaba#ui#selector#ProcessFiletypeOpt(key, opt_val, sel_val) abort
+  if !maktaba#value#IsString(a:opt_val)
+    throw maktaba#error#WrongType('Selector option key %s should be a '
+        \ . 'string, but was %s', a:key, a:opt_val)
+  endif
+  return a:opt_val
+endfunction
+
+
+""
+" @private
 " Process custom syntax options
-function! maktaba#ui#selector#ProcessCustomSyntax(sel_val, opt_val) abort
+function! maktaba#ui#selector#ProcessCustomSyntaxOpt(key, opt_val,sel_val) abort
   let l:ov = maktaba#ensure#IsDict(a:opt_val)
   let l:out = {
     \ 'syntax': [],
@@ -438,8 +493,8 @@ function! maktaba#ui#selector#ProcessCustomSyntax(sel_val, opt_val) abort
   for l:key in keys(l:ov)
     if l:key != 'syntax' && l:key != 'highlight'
       throw maktaba#error#BadValue(
-        \ 'For "custom_syntax" option, got unknown key "%s"; ' .
-        \ 'only possible keys are "syntax" and "highlight"', l:key)
+        \ 'For %s option, got unknown key "%s"; ' .
+        \ 'only possible keys are "syntax" and "highlight"', a:key, l:key)
     endif
   endfor
   if has_key(l:ov, 'syntax')
@@ -471,7 +526,7 @@ endfunction
 " >
 "   'key_to_remove': {}
 " <
-function! maktaba#ui#selector#ProcessKeyMappings(sel_val, opt_val) abort
+function! maktaba#ui#selector#ProcessKeyMappingsOpt(key, opt_val, sel_val) abort
   let l:sv = maktaba#ensure#IsDict(a:sel_val)
   let l:ov = maktaba#ensure#IsDict(a:opt_val)
   let l:out = {}
@@ -499,6 +554,20 @@ function! maktaba#ui#selector#ProcessKeyMappings(sel_val, opt_val) abort
   endfor
   return l:out
 endfunction
+
+
+""
+" @private
+" Process the postdisplay callback option
+function! maktaba#ui#selector#ProcessCallbackOpt(key, opt_val, sel_val) abort
+  if !maktaba#value#IsFuncref(a:opt_val)
+    throw maktaba#error#WrongType('Selector option key %s should be a '
+        \ . 'function, but was %s', a:key, a:opt_val)
+  endif
+  return a:opt_val
+endfunction
+
+
 
 " Available options for the 'window' option in a key mapping.
 let s:window_action_mapping = {
@@ -547,7 +616,7 @@ endfunction
 " - data: dict, keyed by line number, with the value being some arbitrary
 "   data to associate with that line number.
 function! s:ProcessLines(lines) abort
-  let l:info = a:data
+  let l:info = a:lines
   if maktaba#value#IsString(l:info)
     let l:info = split(l:info, "\n")
   endif
